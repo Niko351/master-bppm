@@ -1,0 +1,57 @@
+image: mcr.microsoft.com/dotnet/sdk:latest
+
+variables:
+  OBJECTS_DIRECTORY: 'obj'
+  NUGET_PACKAGES_DIRECTORY: '.nuget'
+  SOURCE_CODE_PATH: '*/*/'
+  APP_NAME: "master-bppm"
+  APP_VERSION: "1.1.6"
+
+cache:
+  key: "$CI_JOB_STAGE-$CI_COMMIT_REF_SLUG"
+  paths:
+    - '$SOURCE_CODE_PATH$OBJECTS_DIRECTORY/project.assets.json'
+    - '$SOURCE_CODE_PATH$OBJECTS_DIRECTORY/*.csproj.nuget.*'
+    - '$NUGET_PACKAGES_DIRECTORY'
+  policy: pull-push
+
+stages:
+  - build
+  - deploy
+
+build-image:
+  stage: build
+  image: docker
+  services:
+    - docker:dind
+  tags: 
+    - b7-bppm-runner
+
+  script:
+    - docker login -u $ARTIFACTORY_USER -p $ARTIFACTORY_PWD $ARTIFACTORY_URL
+    - sed -i -e "s/{ARTIFACTORY_URL}/${ARTIFACTORY_URL}/g" -e "s/{PROJECT_NAME}/${APP_NAME}/g" -e "s/{ENVIRONMENT_NAME}/Development/g" Dockerfile
+    - docker build -t $APP_NAME:$APP_VERSION .
+    - docker tag $APP_NAME:$APP_VERSION $ARTIFACTORY_URL/$APP_NAME:$APP_VERSION
+    - docker push $ARTIFACTORY_URL/$APP_NAME:$APP_VERSION
+    - docker rmi $ARTIFACTORY_URL/$APP_NAME:$APP_VERSION
+    - docker rmi $APP_NAME:$APP_VERSION
+
+.tests:
+  stage: test
+  script:
+    - 'dotnet test --no-restore'
+
+deploy-image:
+  stage: deploy
+  image: openshift/origin-cli
+  tags:
+    - b7-bppm-runner
+  script: 
+    - oc login $OPENSHIFT_URL -u $OPENSHIFT_LOGIN -p $OPENSHIFT_PWD --insecure-skip-tls-verify=true
+    - oc project $NAMESPACE
+    - oc delete secret $APP_NAME-secret --ignore-not-found
+    - oc create secret docker-registry $APP_NAME-secret --docker-server=$ARTIFACTORY_URL --docker-username=b7user --docker-password=Kalbefarm4
+    - cat ocp-deployment.yaml | sed "s/{APP_NAME}/${APP_NAME}/g" | sed "s/{ENVIRONMENT_NAME}/Development/g" | sed "s/{ARTIFACTORY_REPO}/${ARTIFACTORY_URL}/g"  | sed "s/{IMG_NAME}/${APP_NAME}/g"| sed "s/{IMG_TAG}/${APP_VERSION}/g"  | sed "s/{NAMESPACE}/${NAMESPACE}/g" | sed "s,{APP_URL},${APP_NAME}-${NAMESPACE},g" | oc apply -n "$NAMESPACE" -f -
+    - oc rollout status deployment/$APP_NAME -n $NAMESPACE
+    - echo $CONSOLE_OPENSHIFT_URL$NAMESPACE/deployments/$deploymentName
+    - oc get route $deploymentName -o custom-columns=ROUTE:.spec.host --no-headers -n $NAMESPACE
